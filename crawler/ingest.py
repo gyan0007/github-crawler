@@ -5,38 +5,51 @@ from .client import fetch_repos
 from .store import insert_repositories
 
 MIN_CONCURRENCY = 5
-MAX_CONCURRENCY = 50     # ✅ lowered
-START_CONCURRENCY = 10   # ✅ start gentler
-BATCH_SIZE = 500
+MAX_CONCURRENCY = 30      # keep safer upper bound
+START_CONCURRENCY = 10
+BATCH_SIZE = 2000
 
 buffer = []
 buffer_lock = asyncio.Lock()
+
 
 class ConcurrencyController:
     def __init__(self, start=START_CONCURRENCY):
         self.current = start
 
+    async def pre_request(self):
+        # Jitter sleep before *every* API call to spread load
+        await asyncio.sleep(random.uniform(0.2, 0.3))
+
     async def success(self, batch_id: int):
-        if batch_id % 20 == 0:
-            self.current = min(self.current + 5, MAX_CONCURRENCY)
+        # Increase concurrency *slowly* after stable progress
+        if batch_id % 50 == 0:
+            self.current = min(self.current + 1, MAX_CONCURRENCY)
 
     async def rate_limited(self):
-        self.current = max(int(self.current * 0.75), MIN_CONCURRENCY)
-        backoff = random.uniform(10, 20)
+        # Halve concurrency aggressively on rate limit
+        self.current = max(self.current // 2, MIN_CONCURRENCY)
+        backoff = random.uniform(5, 30)
         print(f"⚠️ Rate limit hit. Backing off {backoff:.1f}s, concurrency={self.current}")
         await asyncio.sleep(backoff)
 
 
 def build_star_ranges():
+    # Granular at low star counts (where most repos live)
     return [
-        "0..10", "11..50", "51..100", "101..500",
-        "501..1000", "1001..10000", ">10000"
+        "0..1", "2..5", "6..10", "11..20", "21..50",
+        "51..100", "101..500", "501..1000",
+        "1001..5000", ">5000"
     ]
+
 
 def build_fork_ranges():
     return [
-        "0..50", "51..500", "501..5000", ">5000"
+        "0..1", "2..10", "11..50",
+        "51..200", "201..500",
+        "501..1000", ">1000"
     ]
+
 
 def build_date_ranges(months_back=6, field="created"):
     ranges = []
@@ -46,6 +59,7 @@ def build_date_ranges(months_back=6, field="created"):
         end = (start + datetime.timedelta(days=32)).replace(day=1) - datetime.timedelta(days=1)
         ranges.append(f"{field}:{start}..{end}")
     return ranges
+
 
 def build_shards(months_back=6):
     shards = []
@@ -58,7 +72,7 @@ def build_shards(months_back=6):
             for c in created_ranges:
                 shards.append(f"stars:{s} forks:{f} {c}")
 
-    random.shuffle(shards)  # ✅ spread load
+    random.shuffle(shards)  # spread hot/cold load
     return shards
 
 
@@ -75,7 +89,9 @@ async def crawl_shard(shard, controller, semaphore, batch_id, max_retries=3):
     async with semaphore:
         for attempt in range(1, max_retries + 1):
             try:
+                await controller.pre_request()
                 repos = await fetch_repos(shard)
+
                 if repos:
                     async with buffer_lock:
                         buffer.extend(repos)
@@ -83,22 +99,26 @@ async def crawl_shard(shard, controller, semaphore, batch_id, max_retries=3):
                     await controller.success(batch_id)
                     return len(repos)
                 return 0
+
             except Exception as e:
                 msg = str(e)
                 if "RATE_LIMITED" in msg or "403" in msg:
                     await controller.rate_limited()
                 else:
-                    backoff = (2 ** attempt) + random.uniform(0, 3)
+                    backoff = min(30, (2 ** attempt) + random.uniform(0, 3))
                     print(f"⚠️ Error on shard {shard}, attempt {attempt}/{max_retries}: {e}. Retrying in {backoff:.1f}s...")
                     await asyncio.sleep(backoff)
+
         print(f"❌ Shard {shard} failed after {max_retries} retries")
         return 0
 
 
 async def crawl(target_repos=100000, months_back=6):
     global buffer
+    start_time = datetime.datetime.now()
+
     shards = build_shards(months_back)
-    print(f"🔪 Built {len(shards)} shuffled shards (coarser ranges)")
+    print(f"🔪 Built {len(shards)} shuffled shards (granular ranges)")
 
     controller = ConcurrencyController(start=START_CONCURRENCY)
     total_inserted = 0
@@ -123,5 +143,6 @@ async def crawl(target_repos=100000, months_back=6):
             print(f"📦 Inserted final batch of {inserted} repos")
             buffer = []
 
-    print(f"\n🎉 Done! Inserted {total_inserted} unique repos")
+    elapsed = (datetime.datetime.now() - start_time).total_seconds()
+    print(f"\n🎉 Done! Inserted {total_inserted} unique repos in {elapsed:.2f}s ({elapsed/60:.2f} min)")
 

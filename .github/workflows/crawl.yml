@@ -28,6 +28,8 @@ jobs:
           pip install pytest pytest-asyncio
 
       - name: Run tests
+        env:
+          GITHUB_TOKEN: "dummy_test_token"   # ✅ prevent import error
         run: |
           source venv/bin/activate
           pytest -q
@@ -73,7 +75,7 @@ jobs:
 
       - name: Run crawler (demo)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # ✅ real token for actual crawl
           DATABASE_URL: postgresql://crawler:secret@localhost:5432/crawlerdb
           TARGET_REPOS: 500
           MONTHS_BACK: 3
