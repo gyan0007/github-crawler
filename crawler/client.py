@@ -34,9 +34,12 @@ HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
 
 
 async def fetch_repos(query: str, retries=5):
-    """Fetch repositories from GitHub GraphQL search API."""
+    """Fetch repositories from GitHub GraphQL search API with rate-limit awareness.
+       Returns (repos, remaining_quota, reset_epoch)."""
     repos = []
     cursor = None
+    remaining = None
+    reset = None
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -48,15 +51,22 @@ async def fetch_repos(query: str, retries=5):
                     headers=HEADERS,
                 ) as resp:
                     data = await resp.json()
+                    remaining = int(resp.headers.get("X-RateLimit-Remaining", "1"))
+                    reset = int(resp.headers.get("X-RateLimit-Reset", "0"))
 
                     if resp.status == 403 or "RATE_LIMITED" in str(data):
                         if retries > 0:
                             backoff = random.uniform(10, 20)
-                            print(f"⚠️ Rate limit (query={query}). Retrying in {backoff:.2f}s...")
+                            print(
+                                f"⚠️ Hard rate limit (query={query}). "
+                                f"Retrying in {backoff:.1f}s..."
+                            )
                             await asyncio.sleep(backoff)
                             return await fetch_repos(query, retries=retries - 1)
                         else:
-                            raise RuntimeError(f"❌ Rate limited after retries (query={query})")
+                            raise RuntimeError(
+                                f"❌ Rate limited after retries (query={query})"
+                            )
 
                     if "errors" in data:
                         raise RuntimeError(f"❌ GitHub API error: {data['errors']}")
@@ -84,5 +94,5 @@ async def fetch_repos(query: str, retries=5):
                     print(f"❌ Failed permanently on query={query}: {e}")
                     break
 
-    return repos
+    return repos, remaining, reset
 
